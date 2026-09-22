@@ -22,7 +22,7 @@ class SettingsDialog(ctk.CTkToplevel):
     ) -> None:
         super().__init__(parent)
         self.title("Settings — ArrowDL")
-        self.geometry("520x520")
+        self.geometry("520x560")
         self.resizable(False, False)
         self.configure(fg_color=theme.BG_DARK)
         self.transient(parent)
@@ -101,6 +101,16 @@ class SettingsDialog(ctk.CTkToplevel):
             hover_color=theme.ACCENT_HOVER,
         ).pack(anchor="w", padx=16, pady=(16, 0))
 
+        self.close_tray_var = ctk.BooleanVar(value=settings.close_to_tray)
+        ctk.CTkCheckBox(
+            self,
+            text="Minimize / close to tray (Exit from tray quits)",
+            variable=self.close_tray_var,
+            text_color=theme.TEXT_DIM,
+            fg_color=theme.ACCENT,
+            hover_color=theme.ACCENT_HOVER,
+        ).pack(anchor="w", padx=16, pady=(10, 0))
+
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=16, pady=24)
         ctk.CTkButton(
@@ -149,6 +159,7 @@ class SettingsDialog(ctk.CTkToplevel):
             category_videos=self.cat_videos.get().strip() or "Videos",
             category_other=self.cat_other.get().strip() or "Other",
             start_with_windows=bool(self.start_win_var.get()),
+            close_to_tray=bool(self.close_tray_var.get()),
         )
         ensure_category_dirs(
             s.base_download_folder,

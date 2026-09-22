@@ -1,4 +1,4 @@
-"""Download queue orchestration and scheduler."""
+"""Download engine orchestration and scheduler."""
 
 from __future__ import annotations
 
@@ -6,12 +6,15 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from arrowdl.config import ensure_category_dirs
 from arrowdl.db import Database
 from arrowdl.downloader import DownloadWorker, SpeedLimiter
 from arrowdl.models import DownloadItem, DownloadStatus
+
+
+MAX_ENGINE_RESTARTS = 3
 
 
 def _parse_start_at(value: Optional[str]) -> Optional[datetime]:
@@ -25,7 +28,6 @@ def _parse_start_at(value: Optional[str]) -> Optional[datetime]:
             raw = raw[:-1] + "+00:00"
         dt = datetime.fromisoformat(raw)
         if dt.tzinfo is None:
-            # Naive = local wall time
             dt = dt.astimezone()
         return dt.astimezone(timezone.utc)
     except ValueError:
@@ -36,6 +38,7 @@ class DownloadEngine:
     """
     Polls DB every ~0.5s, starts downloads up to max_concurrent,
     promotes scheduled items when start_at is reached.
+    Auto-requeues workers that die mid-download (bounded retries).
     """
 
     def __init__(self, db: Database) -> None:
@@ -45,7 +48,7 @@ class DownloadEngine:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._runtime: dict[int, dict] = {}  # id -> {speed, eta}
+        self._runtime: dict[int, dict] = {}
         self._paused_all = False
 
         settings = db.get_settings()
@@ -61,9 +64,18 @@ class DownloadEngine:
         )
 
     def start(self) -> None:
-        # Recover: mark stuck 'downloading' as paused so user can resume
+        # Recover: mark stuck 'downloading' as queued (auto-resume) if part exists,
+        # else paused so user can resume.
         for item in self.db.list_downloads(status=DownloadStatus.DOWNLOADING.value):
-            self.db.update_download(item.id, status=DownloadStatus.PAUSED.value)
+            part = Path(item.save_path) / f"{item.filename}.arrowdl.part"
+            if part.exists() and item.engine_retries < MAX_ENGINE_RESTARTS:
+                self.db.update_download(
+                    item.id,
+                    status=DownloadStatus.QUEUED.value,
+                    engine_retries=item.engine_retries + 1,
+                )
+            else:
+                self.db.update_download(item.id, status=DownloadStatus.PAUSED.value)
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="arrowdl-engine")
         self._thread.start()
@@ -94,7 +106,23 @@ class DownloadEngine:
 
     def get_runtime(self, item_id: int) -> dict:
         with self._lock:
-            return dict(self._runtime.get(item_id, {"speed": 0.0, "eta": None}))
+            base = {
+                "speed": 0.0,
+                "eta": None,
+                "segments": 0,
+                "active_segments": 0,
+                "retries": 0,
+            }
+            base.update(self._runtime.get(item_id, {}))
+            w = self._workers.get(item_id)
+            if w:
+                base["retries"] = w.retry_count
+                base["segments"] = w.num_segments
+                base["active_segments"] = w.active_segments
+                if "speed" not in self._runtime.get(item_id, {}):
+                    with w._lock:
+                        base["speed"] = w._speed
+            return base
 
     def add_download(self, item: DownloadItem) -> int:
         if item.start_at:
@@ -128,6 +156,7 @@ class DownloadEngine:
                 item_id,
                 status=DownloadStatus.QUEUED.value,
                 error_message="",
+                engine_retries=0,
             )
         with self._lock:
             w = self._workers.get(item_id)
@@ -199,7 +228,6 @@ class DownloadEngine:
         max_c = max(1, settings.max_concurrent)
         now = datetime.now(timezone.utc)
 
-        # Promote scheduled → queued
         for item in self.db.list_downloads(status=DownloadStatus.SCHEDULED.value):
             dt = _parse_start_at(item.start_at)
             if dt is None or dt <= now:
@@ -207,11 +235,12 @@ class DownloadEngine:
                     item.id, status=DownloadStatus.QUEUED.value, start_at=None
                 )
 
-        # Clean finished workers
+        # Clean finished workers; auto-requeue if died while still downloading
         with self._lock:
             finished = [i for i, w in self._workers.items() if not w.is_alive()]
             for i in finished:
                 self._workers.pop(i, None)
+                self._maybe_requeue_dead(i)
 
         active = len(self._workers)
         slots = max_c - active
@@ -219,10 +248,35 @@ class DownloadEngine:
             return
 
         queued = self.db.list_downloads(status=DownloadStatus.QUEUED.value)
-        # Oldest first
         queued.sort(key=lambda x: x.id or 0)
         for item in queued[:slots]:
             self._start_worker(item)
+
+    def _maybe_requeue_dead(self, item_id: int) -> None:
+        """If worker died but DB still says downloading and part incomplete, re-queue."""
+        item = self.db.get_download(item_id)
+        if not item:
+            return
+        if item.status != DownloadStatus.DOWNLOADING.value:
+            return
+        # Incomplete?
+        incomplete = True
+        if item.total_size > 0 and item.downloaded >= item.total_size:
+            incomplete = False
+        part = Path(item.save_path) / f"{item.filename}.arrowdl.part"
+        if incomplete and item.engine_retries < MAX_ENGINE_RESTARTS:
+            self.db.update_download(
+                item_id,
+                status=DownloadStatus.QUEUED.value,
+                error_message="",
+                engine_retries=item.engine_retries + 1,
+            )
+        elif incomplete:
+            self.db.update_download(
+                item_id,
+                status=DownloadStatus.FAILED.value,
+                error_message="Worker stopped unexpectedly (retries exhausted)",
+            )
 
     def _start_worker(self, item: DownloadItem) -> None:
         if item.id is None:
@@ -240,7 +294,14 @@ class DownloadEngine:
             if speed > 0 and total > downloaded:
                 eta = (total - downloaded) / speed
             with self._lock:
-                self._runtime[item.id] = {"speed": speed, "eta": eta}
+                rt = self._runtime.setdefault(item.id, {})
+                rt["speed"] = speed
+                rt["eta"] = eta
+                w = self._workers.get(item.id)
+                if w:
+                    rt["retries"] = w.retry_count
+                    rt["segments"] = w.num_segments
+                    rt["active_segments"] = w.active_segments
             self.db.update_download(
                 item.id,
                 downloaded=downloaded,
@@ -266,8 +327,15 @@ class DownloadEngine:
                     fields["downloaded"] = w._downloaded
                     if w._total > 0:
                         fields["total_size"] = w._total
+                fields["engine_retries"] = 0
                 with self._lock:
-                    self._runtime[item.id] = {"speed": 0.0, "eta": None}
+                    self._runtime[item.id] = {
+                        "speed": 0.0,
+                        "eta": None,
+                        "segments": 0,
+                        "active_segments": 0,
+                        "retries": 0,
+                    }
             self.db.update_download(item.id, **fields)
 
         worker = DownloadWorker(
@@ -283,4 +351,11 @@ class DownloadEngine:
         )
         with self._lock:
             self._workers[item.id] = worker
+            self._runtime[item.id] = {
+                "speed": 0.0,
+                "eta": None,
+                "segments": item.segments,
+                "active_segments": 0,
+                "retries": 0,
+            }
         worker.start()

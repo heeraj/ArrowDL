@@ -15,7 +15,7 @@ from arrowdl.config import (
     get_db_path,
     get_default_download_base,
 )
-from arrowdl.models import AppSettings, DownloadItem, DownloadStatus
+from arrowdl.models import AppSettings, DownloadItem, DownloadStatus, default_close_to_tray
 
 
 def _utcnow_iso() -> str:
@@ -60,7 +60,20 @@ class Database:
                 """
             )
             self._conn.commit()
+            self._migrate_columns()
             self._ensure_default_settings()
+
+    def _migrate_columns(self) -> None:
+        """Additive migrations for existing DBs."""
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(downloads)").fetchall()
+        }
+        if "engine_retries" not in cols:
+            self._conn.execute(
+                "ALTER TABLE downloads ADD COLUMN engine_retries INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
 
     def _ensure_default_settings(self) -> None:
         defaults = {
@@ -73,6 +86,7 @@ class Database:
             "category_videos": "Videos",
             "category_other": "Other",
             "start_with_windows": "0",
+            "close_to_tray": "1" if default_close_to_tray() else "0",
         }
         for k, v in defaults.items():
             cur = self._conn.execute("SELECT 1 FROM settings WHERE key=?", (k,))
@@ -89,6 +103,7 @@ class Database:
     # ── downloads ──────────────────────────────────────────────
 
     def _row_to_item(self, row: sqlite3.Row) -> DownloadItem:
+        keys = row.keys()
         return DownloadItem(
             id=row["id"],
             url=row["url"],
@@ -104,6 +119,7 @@ class Database:
             error_message=row["error_message"] or "",
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            engine_retries=int(row["engine_retries"]) if "engine_retries" in keys else 0,
         )
 
     def add_download(self, item: DownloadItem) -> int:
@@ -114,8 +130,8 @@ class Database:
                 INSERT INTO downloads (
                     url, filename, save_path, category, status,
                     total_size, downloaded, segments, speed_limit,
-                    start_at, error_message, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    start_at, error_message, created_at, updated_at, engine_retries
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.url,
@@ -131,6 +147,7 @@ class Database:
                     item.error_message,
                     now,
                     now,
+                    item.engine_retries,
                 ),
             )
             self._conn.commit()
@@ -228,6 +245,7 @@ class Database:
             except ValueError:
                 return default
 
+        close_default = "1" if default_close_to_tray() else "0"
         return AppSettings(
             default_segments=_int("default_segments", DEFAULT_SEGMENTS),
             max_concurrent=_int("max_concurrent", DEFAULT_MAX_CONCURRENT),
@@ -240,6 +258,7 @@ class Database:
             category_videos=self.get_setting("category_videos", "Videos"),
             category_other=self.get_setting("category_other", "Other"),
             start_with_windows=self.get_setting("start_with_windows", "0") == "1",
+            close_to_tray=self.get_setting("close_to_tray", close_default) == "1",
         )
 
     def save_settings(self, s: AppSettings) -> None:
@@ -253,6 +272,7 @@ class Database:
             "category_videos": s.category_videos,
             "category_other": s.category_other,
             "start_with_windows": "1" if s.start_with_windows else "0",
+            "close_to_tray": "1" if s.close_to_tray else "0",
         }
         for k, v in mapping.items():
             self.set_setting(k, v)

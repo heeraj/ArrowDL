@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -25,6 +26,21 @@ class Category(str, Enum):
     OTHER = "Other"
 
 
+# Unfinished statuses shown above completed group when filter is All
+UNFINISHED_STATUSES = (
+    DownloadStatus.DOWNLOADING.value,
+    DownloadStatus.QUEUED.value,
+    DownloadStatus.PAUSED.value,
+    DownloadStatus.SCHEDULED.value,
+    DownloadStatus.FAILED.value,
+)
+
+FINISHED_STATUSES = (
+    DownloadStatus.COMPLETED.value,
+    DownloadStatus.CANCELLED.value,
+)
+
+
 @dataclass
 class DownloadItem:
     id: Optional[int] = None
@@ -41,6 +57,7 @@ class DownloadItem:
     error_message: str = ""
     created_at: str = ""
     updated_at: str = ""
+    engine_retries: int = 0
     # Runtime-only fields
     speed: float = 0.0
     eta_seconds: Optional[float] = None
@@ -56,6 +73,11 @@ class DownloadItem:
         return str(Path(self.save_path) / self.filename)
 
 
+def default_close_to_tray() -> bool:
+    """Default True on Windows; True elsewhere when tray is available."""
+    return True
+
+
 @dataclass
 class AppSettings:
     default_segments: int = 4
@@ -67,3 +89,4 @@ class AppSettings:
     category_videos: str = "Videos"
     category_other: str = "Other"
     start_with_windows: bool = False
+    close_to_tray: bool = True

@@ -1,4 +1,4 @@
-"""Multi-segment HTTP(S) download worker with resume and speed limits."""
+"""Multi-segment HTTP(S) download worker with resume, retries, and speed limits."""
 
 from __future__ import annotations
 
@@ -22,6 +22,48 @@ from arrowdl.utils import (
 
 ProgressCallback = Callable[[int, int, float], None]  # downloaded, total, speed
 StatusCallback = Callable[[str, str], None]  # status, error_message
+
+# Retry / backoff knobs
+MAX_SEGMENT_ATTEMPTS = 10
+BACKOFF_BASE = 0.5  # seconds
+BACKOFF_CAP = 8.0
+META_FLUSH_BYTES = 2 * 1024 * 1024  # every ~2 MB
+META_FLUSH_SECS = 2.0
+
+RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+
+TRANSIENT_EXC = (
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.NetworkError,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    """Return True if the error is worth retrying."""
+    if isinstance(exc, TRANSIENT_EXC):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in RETRYABLE_STATUS
+    msg = str(exc).lower()
+    for needle in ("timed out", "connection reset", "temporarily", "broken pipe"):
+        if needle in msg:
+            return True
+    return False
+
+
+def backoff_delay(attempt: int) -> float:
+    """Exponential backoff: 0.5, 1, 2, 4, … capped."""
+    return min(BACKOFF_CAP, BACKOFF_BASE * (2 ** max(0, attempt)))
+
+
+def should_retry_status(status_code: int) -> bool:
+    return status_code in RETRYABLE_STATUS
 
 
 class SpeedLimiter:
@@ -69,7 +111,6 @@ class SpeedLimiter:
             return tokens - nbytes, last, 0.0
         need = nbytes - tokens
         wait = need / limit
-        # Keep tokens; after sleep the refill will cover the shortfall
         return tokens, last, wait
 
     def throttle(self, download_id: int, nbytes: int) -> None:
@@ -99,6 +140,7 @@ class DownloadWorker:
     """
     Downloads a single file with optional multi-segment Range requests.
     Writes to `.arrowdl.part` and `.arrowdl.meta` for resume, then renames.
+    Transient network errors are retried with exponential backoff.
     """
 
     def __init__(
@@ -133,6 +175,24 @@ class DownloadWorker:
         self._total = 0
         self._speed = 0.0
         self._lock = threading.Lock()
+        self._retry_count = 0
+        self._active_segments = 0
+        self._num_segments = 0
+
+    @property
+    def retry_count(self) -> int:
+        with self._lock:
+            return self._retry_count
+
+    @property
+    def active_segments(self) -> int:
+        with self._lock:
+            return self._active_segments
+
+    @property
+    def num_segments(self) -> int:
+        with self._lock:
+            return self._num_segments
 
     def start(self) -> None:
         self.limiter.set_download_limit(self.download_id, self.speed_limit)
@@ -155,6 +215,10 @@ class DownloadWorker:
     def join(self, timeout: float | None = None) -> None:
         if self._thread:
             self._thread.join(timeout)
+
+    def _bump_retry(self) -> None:
+        with self._lock:
+            self._retry_count += 1
 
     def _wait_if_paused(self) -> bool:
         """Return False if cancelled while waiting."""
@@ -215,7 +279,6 @@ class DownloadWorker:
             pass
 
         if total <= 0 or not filename or filename == "download":
-            # Fallback GET with stream to read headers
             with client.stream("GET", self.url, follow_redirects=True) as resp:
                 resp.raise_for_status()
                 cl = resp.headers.get("Content-Length")
@@ -231,8 +294,6 @@ class DownloadWorker:
                     filename = cd
                 if not filename or filename == "download":
                     filename = filename_from_url(str(resp.url))
-                # Don't consume body — we'll re-request
-                # (stream context exit closes connection)
 
         filename = sanitize_filename(filename or filename_from_url(self.url))
         return total, accept_ranges, filename
@@ -275,9 +336,8 @@ class DownloadWorker:
                 return
 
             if not ok:
-                return  # status already emitted (failed/paused handled elsewhere)
+                return
 
-            # Assemble / rename
             if not ppath.exists():
                 self._emit_status("failed", "Part file missing after download")
                 return
@@ -306,51 +366,111 @@ class DownloadWorker:
         ppath: Path,
         mpath: Path,
     ) -> bool:
-        """Single-connection download with optional resume via Range."""
+        """Single-connection download with resume + retry/backoff."""
+        with self._lock:
+            self._num_segments = 1
+            self._active_segments = 1
+
         existing = 0
         if ppath.exists():
             existing = ppath.stat().st_size
 
-        headers = {}
-        mode = "wb"
-        if existing > 0 and total > 0 and existing < total:
-            headers["Range"] = f"bytes={existing}-"
-            mode = "ab"
-        elif existing > 0 and total > 0 and existing >= total:
+        if existing > 0 and total > 0 and existing >= total:
             with self._lock:
                 self._downloaded = existing
                 self._total = total
             self._emit_progress()
             return True
-        else:
-            existing = 0
 
-        with self._lock:
-            self._downloaded = existing
-            self._total = total
-
-        speed_window: list[tuple[float, int]] = []
-        try:
-            with client.stream("GET", self.url, headers=headers, follow_redirects=True) as resp:
-                if resp.status_code == 416:
-                    # Range not satisfiable — restart
-                    existing = 0
-                    mode = "wb"
-                    headers = {}
-                    with client.stream("GET", self.url, follow_redirects=True) as resp2:
-                        return self._consume_stream(resp2, ppath, "wb", 0, total, mpath, single=True)
-                if resp.status_code not in (200, 206):
-                    resp.raise_for_status()
-                # If we asked for Range but got 200, restart from 0
-                if headers.get("Range") and resp.status_code == 200:
-                    existing = 0
-                    mode = "wb"
-                return self._consume_stream(resp, ppath, mode, existing, total, mpath, single=True)
-        except Exception as exc:
+        last_error = ""
+        for attempt in range(MAX_SEGMENT_ATTEMPTS):
             if self._cancel.is_set():
                 return False
-            self._emit_status("failed", str(exc))
-            return False
+            if not self._wait_if_paused():
+                return False
+
+            existing = ppath.stat().st_size if ppath.exists() else 0
+            if total > 0 and existing >= total:
+                with self._lock:
+                    self._downloaded = existing
+                    self._total = total
+                self._emit_progress()
+                return True
+
+            headers: dict[str, str] = {}
+            mode = "wb"
+            if existing > 0 and total > 0 and existing < total:
+                headers["Range"] = f"bytes={existing}-"
+                mode = "ab"
+            elif existing > 0 and total <= 0:
+                # Unknown total — restart cleanly
+                existing = 0
+                mode = "wb"
+            else:
+                existing = 0
+                mode = "wb"
+
+            with self._lock:
+                self._downloaded = existing
+                self._total = total
+
+            try:
+                with client.stream("GET", self.url, headers=headers, follow_redirects=True) as resp:
+                    if resp.status_code == 416:
+                        existing = 0
+                        mode = "wb"
+                        if ppath.exists():
+                            ppath.unlink()
+                        with client.stream("GET", self.url, follow_redirects=True) as resp2:
+                            if should_retry_status(resp2.status_code):
+                                raise httpx.HTTPStatusError(
+                                    f"HTTP {resp2.status_code}",
+                                    request=resp2.request,
+                                    response=resp2,
+                                )
+                            ok = self._consume_stream(
+                                resp2, ppath, "wb", 0, total, mpath, single=True
+                            )
+                            if ok:
+                                return True
+                            if self._cancel.is_set():
+                                return False
+                            continue
+                    if should_retry_status(resp.status_code):
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {resp.status_code}",
+                            request=resp.request,
+                            response=resp,
+                        )
+                    if resp.status_code not in (200, 206):
+                        resp.raise_for_status()
+                    if headers.get("Range") and resp.status_code == 200:
+                        existing = 0
+                        mode = "wb"
+                    ok = self._consume_stream(
+                        resp, ppath, mode, existing, total, mpath, single=True
+                    )
+                    if ok:
+                        return True
+                    if self._cancel.is_set():
+                        return False
+                    # Stream ended early / pause — loop to resume
+                    continue
+            except Exception as exc:
+                if self._cancel.is_set():
+                    return False
+                if not is_transient_error(exc):
+                    self._emit_status("failed", str(exc))
+                    return False
+                last_error = str(exc)
+                self._bump_retry()
+                # Stay in downloading; clear transient message
+                self._emit_status("downloading", "")
+                delay = backoff_delay(attempt)
+                time.sleep(delay)
+
+        self._emit_status("failed", last_error or "Retries exhausted")
+        return False
 
     def _consume_stream(
         self,
@@ -361,16 +481,12 @@ class DownloadWorker:
         total: int,
         mpath: Path,
         single: bool = False,
-        seg_index: int | None = None,
         seg_end: int | None = None,
-        seg_progress: dict | None = None,
-        seg_lock: threading.Lock | None = None,
     ) -> bool:
         chunk_size = 64 * 1024
         downloaded_here = already
         last_meta = time.monotonic()
-        last_speed_t = time.monotonic()
-        last_speed_b = downloaded_here
+        bytes_since_meta = 0
         window_bytes = 0
         window_t0 = time.monotonic()
 
@@ -389,6 +505,7 @@ class DownloadWorker:
                 f.write(chunk)
                 downloaded_here += len(chunk)
                 window_bytes += len(chunk)
+                bytes_since_meta += len(chunk)
 
                 now = time.monotonic()
                 elapsed = now - window_t0
@@ -404,8 +521,10 @@ class DownloadWorker:
                                 self._total = total
                     self._emit_progress()
 
-                # Periodic meta for single
-                if single and now - last_meta >= 1.0:
+                if single and (
+                    now - last_meta >= META_FLUSH_SECS or bytes_since_meta >= META_FLUSH_BYTES
+                ):
+                    f.flush()
                     self._save_meta(
                         mpath,
                         {
@@ -417,15 +536,7 @@ class DownloadWorker:
                         },
                     )
                     last_meta = now
-
-                if seg_progress is not None and seg_index is not None and seg_lock is not None:
-                    with seg_lock:
-                        seg_progress[seg_index] = downloaded_here - already + (
-                            # store absolute written for this segment from start of range
-                            # actually: store current absolute offset position
-                        )
-                        # Better: store bytes written in this segment session + initial offset
-                    # Simpler approach handled in multi wrapper
+                    bytes_since_meta = 0
 
                 if seg_end is not None and downloaded_here > seg_end + 1:
                     break
@@ -444,6 +555,9 @@ class DownloadWorker:
                     "downloaded": downloaded_here,
                 },
             )
+            # Incomplete if we know total and haven't reached it
+            if total > 0 and downloaded_here < total:
+                return False
         return True
 
     def _download_multi(
@@ -456,104 +570,34 @@ class DownloadWorker:
         ranges = compute_segments(total, self.segments)
         n = len(ranges)
         meta = self._load_meta(mpath)
-        seg_done = [0] * n  # bytes completed per segment (relative to range start)
+        seg_done = [0] * n
 
-        if meta and meta.get("mode") == "multi" and meta.get("total") == total and meta.get("url") == self.url:
+        if (
+            meta
+            and meta.get("mode") == "multi"
+            and meta.get("total") == total
+            and meta.get("url") == self.url
+        ):
             prev = meta.get("segments", [])
             if len(prev) == n:
                 for i, s in enumerate(prev):
                     seg_done[i] = int(s.get("done", 0))
 
-        # Pre-allocate part file
         if not ppath.exists() or ppath.stat().st_size != total:
             ppath.parent.mkdir(parents=True, exist_ok=True)
             with open(ppath, "wb") as f:
                 f.truncate(total)
 
+        with self._lock:
+            self._num_segments = n
+            self._active_segments = n
+
         seg_lock = threading.Lock()
         errors: list[str] = []
         cancelled = threading.Event()
+        fall_back = threading.Event()
 
-        def segment_worker(idx: int, start: int, end: int) -> None:
-            done = seg_done[idx]
-            abs_start = start + done
-            if abs_start > end:
-                return
-            headers = {"Range": f"bytes={abs_start}-{end}"}
-            try:
-                with httpx.Client(timeout=self.timeout, follow_redirects=True) as seg_client:
-                    with seg_client.stream("GET", self.url, headers=headers) as resp:
-                        if resp.status_code not in (200, 206):
-                            # Fall back signal
-                            raise RuntimeError(f"Segment {idx} HTTP {resp.status_code}")
-                        if resp.status_code == 200:
-                            # Server ignored Range — abort multi
-                            raise RuntimeError("Server ignored Range; falling back")
-
-                        chunk_size = 64 * 1024
-                        pos = abs_start
-                        window_bytes = 0
-                        window_t0 = time.monotonic()
-
-                        with open(ppath, "r+b") as f:
-                            f.seek(pos)
-                            for chunk in resp.iter_bytes(chunk_size):
-                                if self._cancel.is_set() or cancelled.is_set():
-                                    cancelled.set()
-                                    return
-                                if not self._wait_if_paused():
-                                    cancelled.set()
-                                    return
-                                if not chunk:
-                                    continue
-                                # Don't write past end
-                                remaining = end - pos + 1
-                                if remaining <= 0:
-                                    break
-                                if len(chunk) > remaining:
-                                    chunk = chunk[:remaining]
-
-                                self.limiter.throttle(self.download_id, len(chunk))
-                                f.write(chunk)
-                                pos += len(chunk)
-                                done_now = pos - start
-                                with seg_lock:
-                                    seg_done[idx] = done_now
-                                window_bytes += len(chunk)
-
-                                now = time.monotonic()
-                                elapsed = now - window_t0
-                                if elapsed >= 0.4:
-                                    speed = window_bytes / elapsed
-                                    window_bytes = 0
-                                    window_t0 = now
-                                    with self._lock:
-                                        self._speed = speed
-                                        self._downloaded = sum(seg_done)
-                                        self._total = total
-                                    self._emit_progress()
-
-                        with seg_lock:
-                            seg_done[idx] = end - start + 1
-            except Exception as exc:
-                with seg_lock:
-                    errors.append(str(exc))
-                cancelled.set()
-
-        threads = []
-        for i, (s, e) in enumerate(ranges):
-            t = threading.Thread(target=segment_worker, args=(i, s, e), daemon=True)
-            threads.append(t)
-            t.start()
-
-        # Progress / meta saver while segments run
-        while any(t.is_alive() for t in threads):
-            if self._cancel.is_set():
-                cancelled.set()
-            with self._lock:
-                self._downloaded = sum(seg_done)
-                self._total = total
-            self._emit_progress()
+        def persist_meta() -> None:
             self._save_meta(
                 mpath,
                 {
@@ -567,16 +611,174 @@ class DownloadWorker:
                     ],
                 },
             )
+
+        def segment_worker(idx: int, start: int, end: int) -> None:
+            last_error = ""
+            for attempt in range(MAX_SEGMENT_ATTEMPTS):
+                if self._cancel.is_set() or cancelled.is_set() or fall_back.is_set():
+                    return
+                if not self._wait_if_paused():
+                    cancelled.set()
+                    return
+
+                with seg_lock:
+                    done = seg_done[idx]
+                abs_start = start + done
+                if abs_start > end:
+                    return
+
+                headers = {"Range": f"bytes={abs_start}-{end}"}
+                try:
+                    with httpx.Client(timeout=self.timeout, follow_redirects=True) as seg_client:
+                        with seg_client.stream("GET", self.url, headers=headers) as resp:
+                            if should_retry_status(resp.status_code):
+                                raise httpx.HTTPStatusError(
+                                    f"HTTP {resp.status_code}",
+                                    request=resp.request,
+                                    response=resp,
+                                )
+                            if resp.status_code not in (200, 206):
+                                raise RuntimeError(f"Segment {idx} HTTP {resp.status_code}")
+                            if resp.status_code == 200:
+                                fall_back.set()
+                                raise RuntimeError("Server ignored Range; falling back")
+
+                            chunk_size = 64 * 1024
+                            pos = abs_start
+                            window_bytes = 0
+                            window_t0 = time.monotonic()
+                            last_meta = time.monotonic()
+                            bytes_since_meta = 0
+
+                            with open(ppath, "r+b") as f:
+                                f.seek(pos)
+                                for chunk in resp.iter_bytes(chunk_size):
+                                    if self._cancel.is_set() or cancelled.is_set() or fall_back.is_set():
+                                        cancelled.set()
+                                        return
+                                    if not self._wait_if_paused():
+                                        cancelled.set()
+                                        return
+                                    if not chunk:
+                                        continue
+                                    remaining = end - pos + 1
+                                    if remaining <= 0:
+                                        break
+                                    if len(chunk) > remaining:
+                                        chunk = chunk[:remaining]
+
+                                    self.limiter.throttle(self.download_id, len(chunk))
+                                    f.write(chunk)
+                                    pos += len(chunk)
+                                    done_now = pos - start
+                                    with seg_lock:
+                                        seg_done[idx] = done_now
+                                    window_bytes += len(chunk)
+                                    bytes_since_meta += len(chunk)
+
+                                    now = time.monotonic()
+                                    elapsed = now - window_t0
+                                    if elapsed >= 0.4:
+                                        speed = window_bytes / elapsed
+                                        window_bytes = 0
+                                        window_t0 = now
+                                        with self._lock:
+                                            self._speed = speed
+                                            self._downloaded = sum(seg_done)
+                                            self._total = total
+                                        self._emit_progress()
+
+                                    if (
+                                        now - last_meta >= META_FLUSH_SECS
+                                        or bytes_since_meta >= META_FLUSH_BYTES
+                                    ):
+                                        f.flush()
+                                        with seg_lock:
+                                            persist_meta()
+                                        last_meta = now
+                                        bytes_since_meta = 0
+
+                            # Segment complete?
+                            if pos >= end + 1:
+                                with seg_lock:
+                                    seg_done[idx] = end - start + 1
+                                    persist_meta()
+                                return
+                            # Incomplete stream — retry from offset
+                            last_error = "Segment stream ended early"
+                            self._bump_retry()
+                            self._emit_status("downloading", "")
+                            delay = backoff_delay(attempt)
+                            time.sleep(delay)
+                            continue
+                except Exception as exc:
+                    if fall_back.is_set():
+                        return
+                    if self._cancel.is_set() or cancelled.is_set():
+                        return
+                    if "ignored Range" in str(exc) or "falling back" in str(exc):
+                        fall_back.set()
+                        with seg_lock:
+                            errors.append(str(exc))
+                        return
+                    if not is_transient_error(exc) and not isinstance(exc, RuntimeError):
+                        with seg_lock:
+                            errors.append(str(exc))
+                        cancelled.set()
+                        return
+                    # Transient or RuntimeError HTTP — retry
+                    if isinstance(exc, RuntimeError) and "HTTP" in str(exc):
+                        # Non-retryable HTTP from raise above (non-5xx already filtered)
+                        code_part = str(exc)
+                        # Only fail hard if not retryable path
+                        pass
+                    last_error = str(exc)
+                    self._bump_retry()
+                    self._emit_status("downloading", "")
+                    delay = backoff_delay(attempt)
+                    time.sleep(delay)
+                    continue
+
+            with seg_lock:
+                errors.append(last_error or f"Segment {idx} retries exhausted")
+            cancelled.set()
+
+        threads = []
+        for i, (s, e) in enumerate(ranges):
+            t = threading.Thread(target=segment_worker, args=(i, s, e), daemon=True)
+            threads.append(t)
+            t.start()
+
+        while any(t.is_alive() for t in threads):
+            if self._cancel.is_set():
+                cancelled.set()
+            alive = sum(1 for t in threads if t.is_alive())
+            with self._lock:
+                self._downloaded = sum(seg_done)
+                self._total = total
+                self._active_segments = alive
+            self._emit_progress()
+            with seg_lock:
+                persist_meta()
             time.sleep(0.5)
 
         for t in threads:
             t.join(timeout=1)
 
+        with self._lock:
+            self._active_segments = 0
+
+        if fall_back.is_set():
+            # Reset part file for single-stream fallback
+            try:
+                if ppath.exists():
+                    ppath.unlink()
+            except OSError:
+                pass
+            return self._download_single(client, total, ppath, mpath)
+
         if self._cancel.is_set() or cancelled.is_set():
             if errors and not self._cancel.is_set():
-                # Check if we should fall back to single
-                if any("ignored Range" in e or "falling back" in e for e in errors):
-                    return self._download_single(client, total, ppath, mpath)
                 self._emit_status("failed", "; ".join(errors[:3]))
                 return False
             return False
@@ -584,6 +786,12 @@ class DownloadWorker:
         if errors:
             self._emit_status("failed", "; ".join(errors[:3]))
             return False
+
+        # Verify all segments complete
+        for i, (s, e) in enumerate(ranges):
+            if seg_done[i] < (e - s + 1):
+                self._emit_status("failed", f"Segment {i} incomplete after retries")
+                return False
 
         with self._lock:
             self._downloaded = total

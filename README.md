@@ -3,12 +3,12 @@
 **Fast, simple multi-segment downloads for Windows.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-early%20alpha-orange.svg)](CHANGELOG.md)
+[![Status](https://img.shields.io/badge/status-v1.1-orange.svg)](CHANGELOG.md)
 [![Downloads](https://img.shields.io/github/downloads/heeraj/ArrowDL/total.svg)](https://github.com/heeraj/ArrowDL/releases)
 
 ArrowDL is a lightweight **IDM-style download manager**: split files into segments, queue jobs, limit speed, schedule starts, and keep history locally — without accounts or cloud lock-in.
 
-> **Early build.** Features work, but expect rough edges. Read the [Disclaimer](DISCLAIMER.md) and [Privacy Policy](PRIVACY.md) before installing.
+> **v1.1.** Stable enough for daily downloads; still expect polish. Read the [Disclaimer](DISCLAIMER.md) and [Privacy Policy](PRIVACY.md) before installing.
 
 ---
 
@@ -54,22 +54,31 @@ run.bat
 
 ---
 
+
+### Tips (v1.1)
+- **Multi-select:** Ctrl+click to toggle, Shift+click for a range; use the selection bar to Start / Pause / Stop / Delete.
+- **Mini window:** Double-click an active download (or right-click → Open mini window) for a small always-on-top progress view.
+- **Tray:** Closing the main window hides to the tray by default (Settings → Minimize / close to tray). Exit from the tray menu to quit and stop the engine.
+
 ## Features
 
-### Available now (v0.1 alpha)
-- Multi-segment HTTP(S) download + resume
-- Pause / resume / cancel (one or all)
+### Available now (v1.1)
+- Multi-segment HTTP(S) download + resume with retry/backoff on network blips
+- Pause / resume / cancel (one, multi-select, or all)
 - Global & per-download speed limit
 - Queue with max concurrent downloads
 - Schedule start time
 - Categories & default folders
+- Multi-select list + selection action bar; unfinished-first grouping
+- Mini progress window (always-on-top) per download
+- System tray: close to tray, pause/resume unfinished, Exit
 - Delete list entry ± delete files on disk
-- Dark desktop UI
+- Compact dark customtkinter UI
 
 ### Coming later
 - Browser extension (catch clicked links)
 - Page media / video URL detection
-- System tray + start with Windows
+- Start with Windows (setting saved; registry wiring later)
 - Signed installer & auto-update
 
 ### Not planned for early versions

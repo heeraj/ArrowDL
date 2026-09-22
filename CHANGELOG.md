@@ -2,6 +2,30 @@
 
 All notable changes to ArrowDL are documented here.
 
+## [0.1.1] / v1.1 — 2026-09-22
+
+### Stability & UI polish
+
+**Fixed**
+- Downloads no longer fail on a single network blip: per-segment and single-stream reads retry with exponential backoff (0.5s→8s, up to ~10 attempts), resuming Range from the current offset
+- Meta (`.arrowdl.meta`) flushes more often (~every 2 MB or 2s) so resume survives crashes
+- Engine auto-requeues a worker that dies while status is still `downloading` (bounded, max 3 engine restarts)
+- List refresh no longer rebuilds every 500ms blindly — in-place progress/speed updates preserve multi-select
+
+**Added**
+- Compact minimalist layout (~1000×560): tighter toolbar (~40px), sidebar (~140px), row height ~30px
+- Shared `COL_SPECS` so Size / Progress / Speed / ETA headers and cells stay aligned (right-align for Size/Speed/ETA)
+- Multi-select: Ctrl+click toggle, Shift+click range; selection action bar (▶ Start, ⏸ Pause, ⏹ Stop, 🗑 Delete)
+- Auto-arrange: unfinished downloads first when filter is All; thin “Completed” separator
+- Mini download window (always-on-top): double-click downloading/paused, or right-click → Open mini window
+- System tray (pystray + Pillow): close/minimize to tray; menu Show / Pause unfinished / Resume unfinished / Exit
+- Settings: “Minimize / close to tray”
+- Status bar shows Segments and Retries for the active download
+
+**Known limitations**
+- Tray may be unavailable on headless Linux CI (app falls back to quit-on-close)
+- No browser extension / torrents yet
+
 ## [0.1.0-alpha] — 2026-09-22
 
 ### Early build — first public alpha
