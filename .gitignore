@@ -1,0 +1,17 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.spec
+.DS_Store
+Thumbs.db
+*.log
+.arrowdl.part
+.arrowdl.meta
+AppData/
+*.exe
+*.msi
+installer/Output/
