@@ -1,4 +1,4 @@
-"""Shared download-list column specs and sort helpers (v1.1)."""
+"""Shared download-list column specs and sort helpers (v1.2)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ COL_SPECS: List[Tuple[str, str, int, str]] = [
     ("size", "Size", 88, "e"),
     ("progress", "Progress", 120, "w"),  # bar+pct frame; fixed width
     ("speed", "Speed", 88, "e"),
-    ("eta", "ETA", 72, "e"),
+    ("eta", "ETA", 96, "e"),
     ("status", "Status", 96, "w"),
     ("category", "Category", 80, "w"),
 ]

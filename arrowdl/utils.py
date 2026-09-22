@@ -119,6 +119,31 @@ def format_eta(seconds: float | None) -> str:
     return f"{h}h {m}m"
 
 
+def mbps_to_bps(mbps: float | int | None) -> int:
+    """Convert megabits/sec to bytes/sec. 0 or negative → 0 (unlimited)."""
+    try:
+        v = float(mbps)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    if v <= 0:
+        return 0
+    return int(v * 1_000_000 / 8)
+
+
+def format_eta_wallclock(seconds: float | None) -> str:
+    """Wall-clock finish hint like '~3:42 PM', or empty if unknown."""
+    if seconds is None or seconds < 0 or seconds == float("inf"):
+        return ""
+    try:
+        from datetime import datetime, timedelta
+
+        finish = datetime.now() + timedelta(seconds=int(seconds))
+        # 12-hour clock without leading zero quirks across platforms
+        return "~" + finish.strftime("%I:%M %p").lstrip("0")
+    except Exception:
+        return ""
+
+
 def compute_segments(total_size: int, num_segments: int) -> List[Tuple[int, int]]:
     """
     Split [0, total_size) into num_segments inclusive ranges (start, end).

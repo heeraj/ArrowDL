@@ -1,4 +1,4 @@
-"""ArrowDL dark theme with cyan/teal accents — compact v1.1 metrics."""
+"""ArrowDL dark theme with cyan/teal accents — compact v1.2 metrics."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ FONT_SIZE_TITLE = 14
 # Compact layout
 TOOLBAR_HEIGHT = 40
 SIDEBAR_WIDTH = 140
-ROW_HEIGHT = 30
+ROW_HEIGHT = 34
 HEADER_HEIGHT = 28
 DEFAULT_GEOMETRY = "1000x560"
 MIN_SIZE = (800, 440)

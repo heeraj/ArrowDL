@@ -2,6 +2,30 @@
 
 All notable changes to ArrowDL are documented here.
 
+## [1.2.0] — 2026-09-22
+
+### Mini window, Resume vs Restart, drag-select
+
+**Fixed**
+- `engine.resume(id)` is a **no-op** when status is `completed` (Resume no longer restarts finished downloads)
+- Main list ▶ Start / context Resume / mini Pause↔Resume only act on paused / failed / cancelled / queued
+- Distinct **Restart (re-download)** path: deletes `.arrowdl.part` / `.arrowdl.meta` / final file, resets progress, re-queues
+
+**Added**
+- Mini window (~360×168): stronger Pause↔Resume, segment pills (`Seg N/M`), progress pulse while downloading, ⚡ Limit chips (Unlimited / 1–5 Mbps + custom), Open folder, Copy URL, Stop; on completed → Open file + Restart
+- Mini window positions remembered per id (`mini_positions.json` in app data)
+- Drag multi-select over list rows (paint/range); Ctrl+click and Shift+click unchanged
+- Selection bar + context menu: **Restart** for completed/failed (never labeled Resume)
+- Keyboard: Space pause/resume · Delete · Ctrl+A unfinished · Ctrl+R restart completed · Enter open mini
+- Finish flash on row when a download completes
+- Segment activity strip under main-list progress while downloading
+- ETA wall-clock (“done ~3:42 PM”) alongside relative ETA
+- Smart clipboard chip: “Add URL?” when an http(s) URL lands on the clipboard
+- Settings: optional complete sound (Windows `winsound`, **off by default**)
+
+**Deferred**
+- Raw download throughput vs IDM (kept for a later sprint)
+
 ## [0.1.1] / v1.1 — 2026-09-22
 
 ### Stability & UI polish

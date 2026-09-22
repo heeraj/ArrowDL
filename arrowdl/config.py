@@ -6,7 +6,7 @@ import platform
 from pathlib import Path
 
 APP_NAME = "ArrowDL"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2.0"
 
 DEFAULT_SEGMENTS = 4
 DEFAULT_MAX_CONCURRENT = 3

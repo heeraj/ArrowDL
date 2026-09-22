@@ -144,24 +144,70 @@ class DownloadEngine:
         self.db.update_download(item_id, status=DownloadStatus.PAUSED.value)
 
     def resume(self, item_id: int) -> None:
+        """Resume a paused/failed/cancelled item. No-op if completed or missing."""
         item = self.db.get_download(item_id)
         if not item:
+            return
+        # Critical: never treat completed as resumable (would feel like a restart).
+        if item.status == DownloadStatus.COMPLETED.value:
+            return
+        if item.status == DownloadStatus.DOWNLOADING.value:
+            # Already running — wake worker if paused mid-flight
+            with self._lock:
+                w = self._workers.get(item_id)
+                if w:
+                    w.resume()
             return
         if item.status in (
             DownloadStatus.PAUSED.value,
             DownloadStatus.FAILED.value,
             DownloadStatus.CANCELLED.value,
+            DownloadStatus.QUEUED.value,
         ):
-            self.db.update_download(
-                item_id,
-                status=DownloadStatus.QUEUED.value,
-                error_message="",
-                engine_retries=0,
-            )
+            if item.status != DownloadStatus.QUEUED.value:
+                self.db.update_download(
+                    item_id,
+                    status=DownloadStatus.QUEUED.value,
+                    error_message="",
+                    engine_retries=0,
+                )
         with self._lock:
             w = self._workers.get(item_id)
             if w:
                 w.resume()
+
+    def restart(self, item_id: int) -> None:
+        """Delete part/meta/final file and re-queue from scratch (Re-download)."""
+        item = self.db.get_download(item_id)
+        if not item or item.id is None:
+            return
+        with self._lock:
+            w = self._workers.pop(item_id, None)
+        if w:
+            try:
+                w.cancel()
+            except Exception:
+                pass
+            w.join(timeout=2)
+        self._delete_files(item)
+        self.limiter.remove_download(item_id)
+        self.db.update_download(
+            item_id,
+            status=DownloadStatus.QUEUED.value,
+            downloaded=0,
+            total_size=0,
+            error_message="",
+            engine_retries=0,
+            start_at=None,
+        )
+        with self._lock:
+            self._runtime.pop(item_id, None)
+
+    def set_item_speed_limit(self, item_id: int, bps: int) -> None:
+        """Persist per-download speed limit and apply to live limiter."""
+        bps = max(0, int(bps))
+        self.db.update_download(item_id, speed_limit=bps)
+        self.limiter.set_download_limit(item_id, bps)
 
     def cancel(self, item_id: int) -> None:
         with self._lock:

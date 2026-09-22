@@ -90,3 +90,4 @@ class AppSettings:
     category_other: str = "Other"
     start_with_windows: bool = False
     close_to_tray: bool = True
+    sound_on_complete: bool = False  # Windows winsound; off by default

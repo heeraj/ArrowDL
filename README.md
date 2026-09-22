@@ -3,12 +3,12 @@
 **Fast, simple multi-segment downloads for Windows.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v1.1-orange.svg)](CHANGELOG.md)
+[![Status](https://img.shields.io/badge/status-v1.2-teal.svg)](CHANGELOG.md)
 [![Downloads](https://img.shields.io/github/downloads/heeraj/ArrowDL/total.svg)](https://github.com/heeraj/ArrowDL/releases)
 
 ArrowDL is a lightweight **IDM-style download manager**: split files into segments, queue jobs, limit speed, schedule starts, and keep history locally — without accounts or cloud lock-in.
 
-> **v1.1.** Stable enough for daily downloads; still expect polish. Read the [Disclaimer](DISCLAIMER.md) and [Privacy Policy](PRIVACY.md) before installing.
+> **v1.2.** Mini window + Resume/Restart fix + drag-select. Still expect polish. Read the [Disclaimer](DISCLAIMER.md) and [Privacy Policy](PRIVACY.md) before installing.
 
 ---
 
@@ -55,9 +55,12 @@ run.bat
 ---
 
 
-### Tips (v1.1)
-- **Multi-select:** Ctrl+click to toggle, Shift+click for a range; use the selection bar to Start / Pause / Stop / Delete.
-- **Mini window:** Double-click an active download (or right-click → Open mini window) for a small always-on-top progress view.
+### Tips (v1.2)
+- **Multi-select:** Click-drag to paint-select rows; Ctrl+click toggle, Shift+click range. Selection bar: Start / Restart / Pause / Stop / Delete.
+- **Resume vs Restart:** Resume never restarts a completed file. Use **Restart** (or Ctrl+R) to re-download from scratch.
+- **Mini window:** Double-click an active download (or Enter / right-click → Open mini window). Pause↔Resume, segment pills, ⚡ Limit chips, Open folder / Copy URL / Stop; completed shows Open file + Restart.
+- **Shortcuts:** Space = pause/resume · Delete · Ctrl+A = select unfinished · Ctrl+R = restart completed · Enter = mini window.
+- **Clipboard:** When you copy an http(s) URL, a small “Add URL?” chip appears.
 - **Tray:** Closing the main window hides to the tray by default (Settings → Minimize / close to tray). Exit from the tray menu to quit and stop the engine.
 
 ## Features

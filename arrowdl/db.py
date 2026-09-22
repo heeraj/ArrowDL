@@ -87,6 +87,7 @@ class Database:
             "category_other": "Other",
             "start_with_windows": "0",
             "close_to_tray": "1" if default_close_to_tray() else "0",
+            "sound_on_complete": "0",
         }
         for k, v in defaults.items():
             cur = self._conn.execute("SELECT 1 FROM settings WHERE key=?", (k,))
@@ -259,6 +260,7 @@ class Database:
             category_other=self.get_setting("category_other", "Other"),
             start_with_windows=self.get_setting("start_with_windows", "0") == "1",
             close_to_tray=self.get_setting("close_to_tray", close_default) == "1",
+            sound_on_complete=self.get_setting("sound_on_complete", "0") == "1",
         )
 
     def save_settings(self, s: AppSettings) -> None:
@@ -273,6 +275,7 @@ class Database:
             "category_other": s.category_other,
             "start_with_windows": "1" if s.start_with_windows else "0",
             "close_to_tray": "1" if s.close_to_tray else "0",
+            "sound_on_complete": "1" if s.sound_on_complete else "0",
         }
         for k, v in mapping.items():
             self.set_setting(k, v)
